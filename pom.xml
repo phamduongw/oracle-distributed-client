@@ -58,7 +58,7 @@
                             <descriptorRefs>
                                 <descriptorRef>jar-with-dependencies</descriptorRef>
                             </descriptorRefs>
-                            <finalName>${project.artifactId}-gdd</finalName>
+                            <finalName>gdd</finalName>
                             <archive>
                                 <manifest>
                                     <mainClass>vn.bnh.benchmark.DataSubcriberTransactionGdd</mainClass>
@@ -77,7 +77,7 @@
                             <descriptorRefs>
                                 <descriptorRef>jar-with-dependencies</descriptorRef>
                             </descriptorRefs>
-                            <finalName>${project.artifactId}-rac</finalName>
+                            <finalName>rac</finalName>
                             <archive>
                                 <manifest>
                                     <mainClass>vn.bnh.benchmark.DataSubcriberTransactionRac</mainClass>
