@@ -6,11 +6,7 @@ import oracle.ucp.jdbc.PoolDataSource;
 import oracle.ucp.jdbc.PoolDataSourceFactory;
 
 import java.io.InputStream;
-import java.sql.Connection;
-import java.sql.JDBCType;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.SQLException;
+import java.sql.*;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -19,70 +15,70 @@ public class DataSubcriberTransaction {
 
     private static final Logger LOGGER = Logger.getLogger(DataSubcriberTransaction.class.getName());
 
-    private static String nextvalSql;
+    private static String seqSql;
     private static String insertSql;
     private static String updateSql;
     private static String selectSql;
 
-    private static String envOrDefault(String name, String defaultValue) {
+    private static String env(String name, String def) {
         String v = System.getenv(name);
-        return (v == null || v.isEmpty()) ? defaultValue : v;
+        return (v == null || v.isEmpty()) ? def : v;
     }
 
-    private static String loadResourceAsString(String resourcePath) throws Exception {
+    private static String load(String resourcePath) throws Exception {
         try (InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(resourcePath)) {
             if (is == null) {
-                throw new IllegalStateException("Resource not found: " + resourcePath);
+                throw new IllegalStateException("Missing: " + resourcePath);
             }
             return new String(is.readAllBytes());
         }
     }
 
     private static String buildUrl(String serviceName) {
-        String host = envOrDefault("DB_HOST", null);
-        String port = envOrDefault("DB_PORT", null);
+        String host = env("DB_HOST", "10.10.11.147");
+        String port = env("DB_PORT", "1522");
         return "jdbc:oracle:thin:@//" + host + ":" + port + "/" + serviceName;
     }
 
     private static PoolDataSource createCatalogPool() throws SQLException {
-        String service = envOrDefault("CATALOG_SERVICE", null);
+        String service = env("CATALOG_SERVICE", "GDS$CATALOG.raft_vmdb");
         String url = buildUrl(service);
-        String user = envOrDefault("DB_USERNAME", null);
-        String password = envOrDefault("DB_PASSWORD", null);
+        String user = env("DB_USERNAME", "app_schema");
+        String password = env("DB_PASSWORD", "App_Schema_Pass_123");
 
-        PoolDataSource pds = PoolDataSourceFactory.getPoolDataSource();
-        pds.setConnectionFactoryClassName(OracleDataSource.class.getName());
-        pds.setURL(url);
-        pds.setUser(user);
-        pds.setPassword(password);
-        pds.setInitialPoolSize(1);
-        pds.setMinPoolSize(1);
-        pds.setMaxPoolSize(1);
-        return pds;
+        PoolDataSource p = PoolDataSourceFactory.getPoolDataSource();
+        p.setConnectionFactoryClassName(OracleDataSource.class.getName());
+        p.setURL(url);
+        p.setUser(user);
+        p.setPassword(password);
+        p.setInitialPoolSize(1);
+        p.setMinPoolSize(1);
+        p.setMaxPoolSize(1);
+        return p;
     }
 
     private static PoolDataSource createAppPool() throws SQLException {
-        String service = envOrDefault("APP_SERVICE", null);
+        String service = env("APP_SERVICE", "app_rw_svc.oak.raft_vmdb");
         String url = buildUrl(service);
-        String user = envOrDefault("DB_USERNAME", null);
-        String password = envOrDefault("DB_PASSWORD", null);
+        String user = env("DB_USERNAME", "app_schema");
+        String password = env("DB_PASSWORD", "App_Schema_Pass_123");
 
-        PoolDataSource pds = PoolDataSourceFactory.getPoolDataSource();
-        pds.setConnectionFactoryClassName(OracleDataSource.class.getName());
-        pds.setURL(url);
-        pds.setUser(user);
-        pds.setPassword(password);
-        pds.setInitialPoolSize(1);
-        pds.setMinPoolSize(1);
-        pds.setMaxPoolSize(1);
-        return pds;
+        PoolDataSource p = PoolDataSourceFactory.getPoolDataSource();
+        p.setConnectionFactoryClassName(OracleDataSource.class.getName());
+        p.setURL(url);
+        p.setUser(user);
+        p.setPassword(password);
+        p.setInitialPoolSize(3);
+        p.setMinPoolSize(3);
+        p.setMaxPoolSize(3);
+        return p;
     }
 
-    private static long getNextDataSubcriberId(PoolDataSource catalogPool) throws SQLException {
-        try (Connection conn = catalogPool.getConnection(); PreparedStatement ps = conn.prepareStatement(nextvalSql); ResultSet rs = ps.executeQuery()) {
+    private static long getNextId(PoolDataSource catalogPool) throws SQLException {
+        try (Connection c = catalogPool.getConnection(); PreparedStatement ps = c.prepareStatement(seqSql); ResultSet rs = ps.executeQuery()) {
 
             if (!rs.next()) {
-                throw new SQLException("nextvalSql did not return a value");
+                throw new SQLException("Sequence did not return value");
             }
             return rs.getLong(1);
         }
@@ -93,9 +89,23 @@ public class DataSubcriberTransaction {
         return String.format("%011d", v);
     }
 
+    private static boolean isOra3838(SQLException e) {
+        SQLException cur = e;
+        while (cur != null) {
+            if (cur.getErrorCode() == 3838) {
+                return true;
+            }
+            String msg = cur.getMessage();
+            if (msg != null && msg.contains("ORA-03838")) {
+                return true;
+            }
+            cur = cur.getNextException();
+        }
+        return false;
+    }
+
     private static void executeTransactionWithRetry(PoolDataSource appPool, long id, String msisdn, String subId) {
-        String threadName = Thread.currentThread().getName();
-        while (true) {
+        for (; ; ) {
             Connection conn = null;
             try {
                 OracleShardingKey sk = appPool.createShardingKeyBuilder().subkey(id, JDBCType.NUMERIC).build();
@@ -127,33 +137,40 @@ public class DataSubcriberTransaction {
                 }
 
                 conn.commit();
-                LOGGER.info(() -> "Committed transaction [thread=" + threadName + ", ID=" + id + ", MSISDN=" + msisdn + ", SUB_ID=" + subId + "]");
+                LOGGER.info("COMMIT id=" + id + " msisdn=" + msisdn + " subId=" + subId);
                 return;
             } catch (SQLException e) {
-                LOGGER.log(Level.WARNING, "Transaction failed [thread=" + threadName + ", ID=" + id + ", MSISDN=" + msisdn + ", SUB_ID=" + subId + "], retrying", e);
                 if (conn != null) {
                     try {
                         conn.rollback();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Rollback failed [thread=" + threadName + "]", ex);
+                        LOGGER.log(Level.WARNING, "Rollback failed for id=" + id, ex);
                     }
                 }
+
+                if (isOra3838(e)) {
+                    LOGGER.warning("ORA-3838, retry with new leader, id=" + id);
+                    continue;
+                }
+
+                LOGGER.log(Level.SEVERE, "Unexpected SQL error for id=" + id, e);
+                return;
             } catch (Exception e) {
-                LOGGER.log(Level.SEVERE, "Unexpected error [thread=" + threadName + ", ID=" + id + ", MSISDN=" + msisdn + ", SUB_ID=" + subId + "], aborting transaction", e);
                 if (conn != null) {
                     try {
                         conn.rollback();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Rollback failed [thread=" + threadName + "]", ex);
+                        LOGGER.log(Level.WARNING, "Rollback failed for id=" + id, ex);
                     }
                 }
+                LOGGER.log(Level.SEVERE, "Unexpected error for id=" + id, e);
                 return;
             } finally {
                 if (conn != null) {
                     try {
                         conn.close();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Failed to close connection [thread=" + threadName + "]", ex);
+                        LOGGER.log(Level.WARNING, "Failed to close connection for id=" + id, ex);
                     }
                 }
             }
@@ -162,28 +179,24 @@ public class DataSubcriberTransaction {
 
     public static void main(String[] args) {
         try {
-            nextvalSql = loadResourceAsString("sql/nextval_data_subcriber.sql");
-            insertSql = loadResourceAsString("sql/insert_data_subcriber.sql");
-            updateSql = loadResourceAsString("sql/update_data_subcriber.sql");
-            selectSql = loadResourceAsString("sql/select_data_subcriber.sql");
+            seqSql = load("sql/nextval_data_subcriber.sql");
+            insertSql = load("sql/insert_data_subcriber.sql");
+            updateSql = load("sql/update_data_subcriber.sql");
+            selectSql = load("sql/select_data_subcriber.sql");
 
             PoolDataSource catalogPool = createCatalogPool();
             PoolDataSource appPool = createAppPool();
 
-            String threadName = Thread.currentThread().getName();
+            LOGGER.info("DataSubcriberTransaction STARTED");
 
             while (true) {
-                try {
-                    long id = getNextDataSubcriberId(catalogPool);
-                    String msisdn = random11Digit();
-                    String subId = random11Digit();
-                    executeTransactionWithRetry(appPool, id, msisdn, subId);
-                } catch (SQLException e) {
-                    LOGGER.log(Level.SEVERE, "Failed to get next id [thread=" + threadName + "], continuing", e);
-                }
+                long id = getNextId(catalogPool);
+                String msisdn = random11Digit();
+                String subId = random11Digit();
+                executeTransactionWithRetry(appPool, id, msisdn, subId);
             }
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Failed to start application", e);
+            LOGGER.log(Level.SEVERE, "FATAL", e);
         }
     }
 }
