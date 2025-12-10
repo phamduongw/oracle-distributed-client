@@ -11,8 +11,6 @@ import java.sql.JDBCType;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.logging.Level;
 import java.util.logging.Logger;
@@ -31,21 +29,8 @@ public class DataSubcriberTransaction {
         return (v == null || v.isEmpty()) ? defaultValue : v;
     }
 
-    private static int envIntOrDefault(String name, int defaultValue) {
-        String v = System.getenv(name);
-        if (v == null || v.isEmpty()) {
-            return defaultValue;
-        }
-        try {
-            return Integer.parseInt(v);
-        } catch (NumberFormatException e) {
-            return defaultValue;
-        }
-    }
-
     private static String loadResourceAsString(String resourcePath) throws Exception {
         try (InputStream is = Thread.currentThread().getContextClassLoader().getResourceAsStream(resourcePath)) {
-
             if (is == null) {
                 throw new IllegalStateException("Resource not found: " + resourcePath);
             }
@@ -64,18 +49,15 @@ public class DataSubcriberTransaction {
         String url = buildUrl(service);
         String user = envOrDefault("DB_USERNAME", null);
         String password = envOrDefault("DB_PASSWORD", null);
-        int initial = envIntOrDefault("CATALOG_INITIAL_POOL_SIZE", 1);
-        int min = envIntOrDefault("CATALOG_MIN_POOL_SIZE", 1);
-        int max = envIntOrDefault("CATALOG_MAX_POOL_SIZE", 5);
 
         PoolDataSource pds = PoolDataSourceFactory.getPoolDataSource();
         pds.setConnectionFactoryClassName(OracleDataSource.class.getName());
         pds.setURL(url);
         pds.setUser(user);
         pds.setPassword(password);
-        pds.setInitialPoolSize(initial);
-        pds.setMinPoolSize(min);
-        pds.setMaxPoolSize(max);
+        pds.setInitialPoolSize(1);
+        pds.setMinPoolSize(1);
+        pds.setMaxPoolSize(1);
         return pds;
     }
 
@@ -84,18 +66,15 @@ public class DataSubcriberTransaction {
         String url = buildUrl(service);
         String user = envOrDefault("DB_USERNAME", null);
         String password = envOrDefault("DB_PASSWORD", null);
-        int initial = envIntOrDefault("APP_INITIAL_POOL_SIZE", 5);
-        int min = envIntOrDefault("APP_MIN_POOL_SIZE", 5);
-        int max = envIntOrDefault("APP_MAX_POOL_SIZE", 5);
 
         PoolDataSource pds = PoolDataSourceFactory.getPoolDataSource();
         pds.setConnectionFactoryClassName(OracleDataSource.class.getName());
         pds.setURL(url);
         pds.setUser(user);
         pds.setPassword(password);
-        pds.setInitialPoolSize(initial);
-        pds.setMinPoolSize(min);
-        pds.setMaxPoolSize(max);
+        pds.setInitialPoolSize(1);
+        pds.setMinPoolSize(1);
+        pds.setMaxPoolSize(1);
         return pds;
     }
 
@@ -115,9 +94,9 @@ public class DataSubcriberTransaction {
     }
 
     private static void executeTransactionWithRetry(PoolDataSource appPool, long id, String msisdn, String subId) {
+        String threadName = Thread.currentThread().getName();
         while (true) {
             Connection conn = null;
-            String threadName = Thread.currentThread().getName();
             try {
                 OracleShardingKey sk = appPool.createShardingKeyBuilder().subkey(id, JDBCType.NUMERIC).build();
 
@@ -191,23 +170,18 @@ public class DataSubcriberTransaction {
             PoolDataSource catalogPool = createCatalogPool();
             PoolDataSource appPool = createAppPool();
 
-            int threadCount = envIntOrDefault("THREAD_COUNT", 5);
-            ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+            String threadName = Thread.currentThread().getName();
+            LOGGER.info("Starting single-thread load generator on thread " + threadName);
 
-            for (int i = 0; i < threadCount; i++) {
-                executor.submit(() -> {
-                    String threadName = Thread.currentThread().getName();
-                    while (true) {
-                        try {
-                            long id = getNextDataSubcriberId(catalogPool);
-                            String msisdn = random11Digit();
-                            String subId = random11Digit();
-                            executeTransactionWithRetry(appPool, id, msisdn, subId);
-                        } catch (SQLException e) {
-                            LOGGER.log(Level.SEVERE, "Failed to get next id [thread=" + threadName + "], continuing", e);
-                        }
-                    }
-                });
+            while (true) {
+                try {
+                    long id = getNextDataSubcriberId(catalogPool);
+                    String msisdn = random11Digit();
+                    String subId = random11Digit();
+                    executeTransactionWithRetry(appPool, id, msisdn, subId);
+                } catch (SQLException e) {
+                    LOGGER.log(Level.SEVERE, "Failed to get next id [thread=" + threadName + "], continuing", e);
+                }
             }
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "Failed to start application", e);
