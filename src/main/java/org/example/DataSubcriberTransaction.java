@@ -171,7 +171,6 @@ public class DataSubcriberTransaction {
             PoolDataSource appPool = createAppPool();
 
             String threadName = Thread.currentThread().getName();
-            LOGGER.info("Starting single-thread load generator on thread " + threadName);
 
             while (true) {
                 try {
