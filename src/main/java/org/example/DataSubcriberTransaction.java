@@ -7,7 +7,11 @@ import oracle.ucp.jdbc.PoolDataSourceFactory;
 
 import java.io.InputStream;
 import java.sql.*;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -23,6 +27,10 @@ public class DataSubcriberTransaction {
     private static String env(String name, String def) {
         String v = System.getenv(name);
         return (v == null || v.isEmpty()) ? def : v;
+    }
+
+    private static int envInt(String name, String def) {
+        return Integer.parseInt(env(name, def));
     }
 
     private static String load(String resourcePath) throws Exception {
@@ -46,14 +54,18 @@ public class DataSubcriberTransaction {
         String user = env("DB_USERNAME", "app_schema");
         String password = env("DB_PASSWORD", "App_Schema_Pass_123");
 
+        int initialSize = envInt("CATALOG_INITIAL_POOL_SIZE", "1");
+        int minSize = envInt("CATALOG_MIN_POOL_SIZE", "1");
+        int maxSize = envInt("CATALOG_MAX_POOL_SIZE", "5");
+
         PoolDataSource p = PoolDataSourceFactory.getPoolDataSource();
         p.setConnectionFactoryClassName(OracleDataSource.class.getName());
         p.setURL(url);
         p.setUser(user);
         p.setPassword(password);
-        p.setInitialPoolSize(1);
-        p.setMinPoolSize(1);
-        p.setMaxPoolSize(1);
+        p.setInitialPoolSize(initialSize);
+        p.setMinPoolSize(minSize);
+        p.setMaxPoolSize(maxSize);
         return p;
     }
 
@@ -63,14 +75,18 @@ public class DataSubcriberTransaction {
         String user = env("DB_USERNAME", "app_schema");
         String password = env("DB_PASSWORD", "App_Schema_Pass_123");
 
+        int initialSize = envInt("APP_INITIAL_POOL_SIZE", "5");
+        int minSize = envInt("APP_MIN_POOL_SIZE", "5");
+        int maxSize = envInt("APP_MAX_POOL_SIZE", "5");
+
         PoolDataSource p = PoolDataSourceFactory.getPoolDataSource();
         p.setConnectionFactoryClassName(OracleDataSource.class.getName());
         p.setURL(url);
         p.setUser(user);
         p.setPassword(password);
-        p.setInitialPoolSize(3);
-        p.setMinPoolSize(3);
-        p.setMaxPoolSize(3);
+        p.setInitialPoolSize(initialSize);
+        p.setMinPoolSize(minSize);
+        p.setMaxPoolSize(maxSize);
         return p;
     }
 
@@ -102,6 +118,10 @@ public class DataSubcriberTransaction {
             cur = cur.getNextException();
         }
         return false;
+    }
+
+    private static String threadLabel() {
+        return "[thread=" + Thread.currentThread().getName() + "] ";
     }
 
     private static void executeTransactionWithRetry(PoolDataSource appPool, long id, String msisdn, String subId) {
@@ -137,44 +157,58 @@ public class DataSubcriberTransaction {
                 }
 
                 conn.commit();
-                LOGGER.info("COMMIT id=" + id + " msisdn=" + msisdn + " subId=" + subId);
+                LOGGER.info(threadLabel() + "COMMIT id=" + id + " msisdn=" + msisdn + " subId=" + subId);
                 return;
             } catch (SQLException e) {
                 if (conn != null) {
                     try {
                         conn.rollback();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Rollback failed for id=" + id, ex);
+                        LOGGER.log(Level.WARNING, threadLabel() + "Rollback failed for id=" + id, ex);
                     }
                 }
 
                 if (isOra3838(e)) {
-                    LOGGER.warning("ORA-3838, retry with new leader, id=" + id);
+                    LOGGER.warning(threadLabel() + "ORA-3838, retry with new leader, id=" + id);
                     continue;
                 }
 
-                LOGGER.log(Level.SEVERE, "Unexpected SQL error for id=" + id, e);
+                LOGGER.log(Level.SEVERE, threadLabel() + "Unexpected SQL error for id=" + id, e);
                 return;
             } catch (Exception e) {
                 if (conn != null) {
                     try {
                         conn.rollback();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Rollback failed for id=" + id, ex);
+                        LOGGER.log(Level.WARNING, threadLabel() + "Rollback failed for id=" + id, ex);
                     }
                 }
-                LOGGER.log(Level.SEVERE, "Unexpected error for id=" + id, e);
+                LOGGER.log(Level.SEVERE, threadLabel() + "Unexpected error for id=" + id, e);
                 return;
             } finally {
                 if (conn != null) {
                     try {
                         conn.close();
                     } catch (SQLException ex) {
-                        LOGGER.log(Level.WARNING, "Failed to close connection for id=" + id, ex);
+                        LOGGER.log(Level.WARNING, threadLabel() + "Failed to close connection for id=" + id, ex);
                     }
                 }
             }
         }
+    }
+
+    private static ExecutorService createExecutor(int threads) {
+        ThreadFactory tf = new ThreadFactory() {
+            private int idx = 1;
+
+            @Override
+            public synchronized Thread newThread(Runnable r) {
+                Thread t = new Thread(r);
+                t.setName("worker-" + idx++);
+                return t;
+            }
+        };
+        return Executors.newFixedThreadPool(threads, tf);
     }
 
     public static void main(String[] args) {
@@ -184,17 +218,33 @@ public class DataSubcriberTransaction {
             updateSql = load("sql/update_data_subcriber.sql");
             selectSql = load("sql/select_data_subcriber.sql");
 
+            int threadCount = envInt("THREAD_COUNT", "5");
+
             PoolDataSource catalogPool = createCatalogPool();
             PoolDataSource appPool = createAppPool();
 
-            LOGGER.info("DataSubcriberTransaction STARTED");
+            LOGGER.info("DataSubcriberTransaction STARTED with threads=" + threadCount);
 
-            while (true) {
-                long id = getNextId(catalogPool);
-                String msisdn = random11Digit();
-                String subId = random11Digit();
-                executeTransactionWithRetry(appPool, id, msisdn, subId);
+            ExecutorService executor = createExecutor(threadCount);
+
+            for (int i = 0; i < threadCount; i++) {
+                executor.submit(() -> {
+                    LOGGER.info(threadLabel() + "Worker started");
+                    while (true) {
+                        try {
+                            long id = getNextId(catalogPool);
+                            String msisdn = random11Digit();
+                            String subId = random11Digit();
+                            executeTransactionWithRetry(appPool, id, msisdn, subId);
+                        } catch (Exception e) {
+                            LOGGER.log(Level.SEVERE, threadLabel() + "Worker error", e);
+                        }
+                    }
+                });
             }
+
+            executor.shutdown();
+            executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "FATAL", e);
         }
