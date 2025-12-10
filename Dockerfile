@@ -1,3 +1,4 @@
+# ===== STAGE 1: BUILD =====
 FROM maven:3.9-eclipse-temurin-17 AS build
 
 WORKDIR /app
@@ -11,12 +12,10 @@ COPY src ./src
 RUN mvn -q -B clean package -DskipTests
 
 
+# ===== STAGE 2: RUNTIME =====
 FROM eclipse-temurin:17-jre-alpine
 
 WORKDIR /app
-
-COPY hosts.txt /tmp/hosts-extra
-RUN cat /tmp/hosts-extra >> /etc/hosts && rm /tmp/hosts-extra
 
 RUN addgroup -S app && adduser -S app -G app
 USER app

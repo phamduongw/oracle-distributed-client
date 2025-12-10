@@ -1,6 +1,0 @@
-10.10.11.150    cuongtq-db23ai-01
-10.10.11.151    cuongtq-db23ai-02
-10.10.11.152    cuongtq-db23ai-03
-10.10.11.148    cuongtq-db23ai-04
-10.10.11.144    cuongtq-db23ai-05
-10.10.11.147    cuongtq-db23ai-06
