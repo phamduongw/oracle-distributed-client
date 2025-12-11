@@ -58,10 +58,10 @@
                             <descriptorRefs>
                                 <descriptorRef>jar-with-dependencies</descriptorRef>
                             </descriptorRefs>
-                            <finalName>gdd</finalName>
+                            <finalName>gdd-dml</finalName>
                             <archive>
                                 <manifest>
-                                    <mainClass>vn.bnh.benchmark.DataSubcriberTransactionGdd</mainClass>
+                                    <mainClass>vn.bnh.benchmark.BccsSaleTransactionGdd</mainClass>
                                 </manifest>
                             </archive>
                         </configuration>
@@ -77,10 +77,10 @@
                             <descriptorRefs>
                                 <descriptorRef>jar-with-dependencies</descriptorRef>
                             </descriptorRefs>
-                            <finalName>rac</finalName>
+                            <finalName>gdd-qps</finalName>
                             <archive>
                                 <manifest>
-                                    <mainClass>vn.bnh.benchmark.DataSubcriberTransactionRac</mainClass>
+                                    <mainClass>vn.bnh.benchmark.BccsSaleQpsGdd</mainClass>
                                 </manifest>
                             </archive>
                         </configuration>
