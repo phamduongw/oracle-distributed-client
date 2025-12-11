@@ -77,10 +77,10 @@
                             <descriptorRefs>
                                 <descriptorRef>jar-with-dependencies</descriptorRef>
                             </descriptorRefs>
-                            <finalName>gdd-qps</finalName>
+                            <finalName>rac-dml</finalName>
                             <archive>
                                 <manifest>
-                                    <mainClass>vn.bnh.benchmark.BccsSaleQpsGdd</mainClass>
+                                    <mainClass>vn.bnh.benchmark.BccsSaleTransactionRac</mainClass>
                                 </manifest>
                             </archive>
                         </configuration>
