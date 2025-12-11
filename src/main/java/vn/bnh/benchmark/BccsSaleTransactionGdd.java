@@ -16,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
@@ -28,6 +29,10 @@ public class BccsSaleTransactionGdd {
     private static String accountSql;
     private static String subscriberSql;
 
+    private static long maxTransactions;
+    private static final AtomicLong SUCCESS_COUNT = new AtomicLong(0);
+    private static final Object COUNTER_LOCK = new Object();
+
     private static String env(String key) {
         String v = System.getenv(key);
         if (v == null || v.isEmpty()) {
@@ -38,6 +43,10 @@ public class BccsSaleTransactionGdd {
 
     private static int envInt(String key) {
         return Integer.parseInt(env(key));
+    }
+
+    private static long envLong(String key) {
+        return Long.parseLong(env(key));
     }
 
     private static String loadSql(String path) throws Exception {
@@ -77,7 +86,17 @@ public class BccsSaleTransactionGdd {
         return pool.createShardingKeyBuilder().subkey(custId, JDBCType.VARCHAR).build();
     }
 
-    private static void executeTransaction(PoolDataSource pool) {
+    /**
+     * Thực hiện 1 transaction.
+     *
+     * @return true nếu commit thành công và vẫn còn quota; false nếu đã đủ MAX_ID và thread nên dừng.
+     */
+    private static boolean executeTransaction(PoolDataSource pool) {
+
+        // Nếu đã đủ quota thì không làm gì nữa
+        if (SUCCESS_COUNT.get() >= maxTransactions) {
+            return false;
+        }
 
         String custId = UUID.randomUUID().toString();
         String custIdentityId = UUID.randomUUID().toString();
@@ -107,16 +126,30 @@ public class BccsSaleTransactionGdd {
                 }
 
                 try (PreparedStatement ps = conn.prepareStatement(subscriberSql)) {
-                    ps.setString(1, subId);
-                    ps.setString(2, subId);
-                    ps.setString(3, custId);
-                    ps.setString(4, accountId);
+                    ps.setString(1, subId);     // SUB_ID
+                    ps.setString(2, subId);     // CONTRACT_ID
+                    ps.setString(3, custId);    // CUST_ID
+                    ps.setString(4, accountId); // ACCOUNT_ID
                     ps.executeUpdate();
                 }
 
-                conn.commit();
-                LOGGER.info("[" + Thread.currentThread().getName() + "] COMMIT CUST_ID=" + custId + " SUB_ID=" + subId);
-                return;
+                // Serialize: check quota + commit + tăng counter
+                synchronized (COUNTER_LOCK) {
+                    if (SUCCESS_COUNT.get() >= maxTransactions) {
+                        conn.rollback();
+                        return false;
+                    }
+
+                    conn.commit();
+                    long done = SUCCESS_COUNT.incrementAndGet();
+                    LOGGER.info("[" + Thread.currentThread().getName() + "] COMMIT CUST_ID=" + custId + " SUB_ID=" + subId + " TOTAL=" + done);
+
+                    if (done >= maxTransactions) {
+                        return false;
+                    }
+                }
+
+                return true;
             } catch (SQLException e) {
                 if (isOra3838(e)) {
                     LOGGER.warning("[" + Thread.currentThread().getName() + "] ORA-03838 retry CUST_ID=" + custId + " SUB_ID=" + subId);
@@ -149,21 +182,25 @@ public class BccsSaleTransactionGdd {
             subscriberSql = loadSql("sql/insert_subscriber.sql");
 
             int threads = envInt("THREAD_COUNT");
+            maxTransactions = envLong("MAX_ID");
+
             PoolDataSource pool = createAppPool();
 
-            LOGGER.info("BccsSaleTransactionGdd STARTED with threads=" + threads);
+            LOGGER.info("BccsSaleTransactionGdd STARTED with threads=" + threads + ", MAX_ID=" + maxTransactions);
 
             ExecutorService executor = createExecutor(threads);
             for (int i = 0; i < threads; i++) {
                 executor.submit(() -> {
-                    while (true) {
-                        executeTransaction(pool);
+                    while (executeTransaction(pool)) {
+                        // loop đến khi hết quota hoặc có lỗi fatal (System.exit)
                     }
                 });
             }
 
             executor.shutdown();
             executor.awaitTermination(Long.MAX_VALUE, TimeUnit.DAYS);
+
+            LOGGER.info("BccsSaleTransactionGdd FINISHED, TOTAL_SUCCESS=" + SUCCESS_COUNT.get());
         } catch (Exception e) {
             LOGGER.log(Level.SEVERE, "FATAL", e);
             System.exit(1);
